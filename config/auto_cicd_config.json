@@ -1,0 +1,90 @@
+{
+  "easydeploy": {
+    "description": "EasyDeploy configuration - Deploy your apps effortlessly!",
+    "version": "2.0.0",
+    "project_name": "EasyDeploy",
+    "triggers": {
+      "commit_keywords": [
+        "[deploy]",
+        "[build]", 
+        "[release]",
+        "[publish]",
+        "[ship]"
+      ],
+      "environment_keywords": {
+        "production": ["[production]", "[prod]", "[live]"],
+        "staging": ["[staging]", "[stage]", "[test]"]
+      },
+      "special_flags": {
+        "skip_tests": ["[skip-tests]", "[no-tests]"],
+        "force_deploy": ["[force]", "[force-deploy]"],
+        "quick_deploy": ["[quick]", "[fast]"]
+      },
+      "branch_prefixes": {
+        "auto_deploy": "deploy/",
+        "release_candidate": "release/",
+        "hotfix": "hotfix/"
+      }
+    },
+    "environments": {
+      "development": {
+        "description": "Development environment - where magic happens!",
+        "auto_deploy": true,
+        "require_approval": false,
+        "auto_cleanup": true,
+        "notifications": {
+          "slack": false,
+          "email": false
+        }
+      },
+      "staging": {
+        "description": "Staging environment - final testing before the big moment",
+        "auto_deploy": true,
+        "require_approval": false,
+        "auto_cleanup": true,
+        "notifications": {
+          "slack": false,
+          "email": false
+        }
+      },
+      "production": {
+        "description": "Production environment - where your users see your awesome work!",
+        "auto_deploy": false,
+        "require_approval": true,
+        "auto_cleanup": false,
+        "notifications": {
+          "slack": true,
+          "email": true
+        }
+      }
+    },
+    "deployment": {
+      "build_timeout": "30m",
+      "deploy_timeout": "15m", 
+      "rollback_enabled": true,
+      "health_check_enabled": true,
+      "beginner_mode": true,
+      "detailed_logs": true
+    },
+    "notifications": {
+      "enabled": true,
+      "beginner_friendly_messages": true,
+      "webhook_urls": {
+        "slack": "",
+        "teams": "", 
+        "discord": ""
+      },
+      "email": {
+        "smtp_server": "",
+        "recipients": []
+      }
+    },
+    "beginner_features": {
+      "helpful_error_messages": true,
+      "step_by_step_guidance": true,
+      "auto_fix_common_issues": true,
+      "deployment_previews": true,
+      "rollback_on_failure": true
+    }
+  }
+}

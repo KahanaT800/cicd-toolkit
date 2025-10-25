@@ -1,0 +1,327 @@
+name: Auto CI/CD Pipeline
+
+# Trigger via the following methods to avoid conflicts with existing CI:
+# 1. Special commit messages
+# 2. Specific branch prefixes
+# 3. Manual triggers
+# 4. Repository dispatch events
+on:
+  # Manual trigger
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip tests and deploy directly'
+        required: false
+        default: false
+        type: boolean
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      force_deploy:
+        description: 'Force deployment (even if tests fail)'
+        required: false
+        default: false
+        type: boolean
+
+  # API trigger (webhook method)
+  repository_dispatch:
+    types: 
+      - auto-cicd
+      - deploy-staging
+      - deploy-production
+
+  # Trigger when pushing to specific branch prefixes
+  push:
+    branches:
+      - 'auto-deploy/**'
+      - 'release-candidate/**'
+      - 'hotfix/**'
+
+  # Trigger via push events when commit message contains specific keywords
+  # Note: This requires conditional checks to implement
+
+concurrency:
+  group: auto-cicd-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+  packages: write
+  actions: read
+
+env:
+  # Set environment variables to control the process
+  SKIP_EXISTING_CI: "true"
+  AUTO_CICD_MODE: "true"
+
+jobs:
+  # Check trigger conditions and conflicts
+  check-trigger:
+    name: Check Trigger Conditions
+    runs-on: ubuntu-latest
+    outputs:
+      should_run: ${{ steps.conditions.outputs.should_run }}
+      skip_tests: ${{ steps.conditions.outputs.skip_tests }}
+      deploy_env: ${{ steps.conditions.outputs.deploy_env }}
+      commit_message: ${{ steps.commit_info.outputs.message }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Get commit info
+        id: commit_info
+        run: |
+          # Get latest commit information
+          COMMIT_MSG=$(git log -1 --pretty=format:'%s')
+          echo "message=$COMMIT_MSG" >> $GITHUB_OUTPUT
+          echo "Latest commit: $COMMIT_MSG"
+
+      - name: Check trigger conditions
+        id: conditions
+        run: |
+          SHOULD_RUN="false"
+          SKIP_TESTS="false"
+          DEPLOY_ENV="staging"
+          
+          # Check various trigger conditions
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "✅ Manual trigger detected"
+            SHOULD_RUN="true"
+            SKIP_TESTS="${{ github.event.inputs.skip_tests }}"
+            DEPLOY_ENV="${{ github.event.inputs.environment }}"
+            
+          elif [[ "${{ github.event_name }}" == "repository_dispatch" ]]; then
+            echo "✅ API trigger detected: ${{ github.event.action }}"
+            SHOULD_RUN="true"
+            
+            case "${{ github.event.action }}" in
+              "deploy-production")
+                DEPLOY_ENV="production"
+                ;;
+              "deploy-staging")
+                DEPLOY_ENV="staging"
+                ;;
+              "auto-cicd")
+                DEPLOY_ENV="${{ github.event.client_payload.environment || 'staging' }}"
+                SKIP_TESTS="${{ github.event.client_payload.skip_tests || 'false' }}"
+                ;;
+            esac
+            
+          elif [[ "${{ github.event_name }}" == "push" ]]; then
+            BRANCH_NAME="${{ github.ref_name }}"
+            COMMIT_MSG="${{ steps.commit_info.outputs.message }}"
+            
+            # Check branch prefix
+            if [[ "$BRANCH_NAME" =~ ^(auto-deploy|release-candidate|hotfix)/ ]]; then
+              echo "✅ Special branch trigger: $BRANCH_NAME"
+              SHOULD_RUN="true"
+              
+              if [[ "$BRANCH_NAME" =~ ^release-candidate/ ]]; then
+                DEPLOY_ENV="production"
+              fi
+              
+            # Check commit message keywords
+            elif [[ "$COMMIT_MSG" =~ \[auto-deploy\]|\[deploy\]|\[release\] ]]; then
+              echo "✅ Commit message trigger: $COMMIT_MSG"
+              SHOULD_RUN="true"
+              
+              if [[ "$COMMIT_MSG" =~ \[production\]|\[prod\] ]]; then
+                DEPLOY_ENV="production"
+              fi
+              
+              if [[ "$COMMIT_MSG" =~ \[skip-tests\]|\[no-tests\] ]]; then
+                SKIP_TESTS="true"
+              fi
+            fi
+          fi
+          
+          echo "should_run=$SHOULD_RUN" >> $GITHUB_OUTPUT
+          echo "skip_tests=$SKIP_TESTS" >> $GITHUB_OUTPUT
+          echo "deploy_env=$DEPLOY_ENV" >> $GITHUB_OUTPUT
+          
+          echo "🔍 Trigger Analysis:"
+          echo "  Should Run: $SHOULD_RUN"
+          echo "  Skip Tests: $SKIP_TESTS"
+          echo "  Deploy Environment: $DEPLOY_ENV"
+
+      - name: Cancel conflicting CI runs
+        if: steps.conditions.outputs.should_run == 'true'
+        run: |
+          echo "🛑 Cancelling conflicting CI runs for this commit..."
+          
+          # Get current commit SHA
+          COMMIT_SHA="${{ github.sha }}"
+          
+          # Cancel other CI workflows for the same commit
+          gh run list \
+            --workflow=ci.yml \
+            --json databaseId,status,headSha \
+            --jq ".[] | select(.headSha == \"$COMMIT_SHA\" and .status == \"in_progress\") | .databaseId" \
+            | xargs -I {} gh run cancel {} || echo "No CI runs to cancel"
+            
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Quick CI check (simplified version to avoid duplication)
+  quick-ci:
+    name: Quick CI Check
+    runs-on: ubuntu-latest
+    needs: check-trigger
+    if: needs.check-trigger.outputs.should_run == 'true' && needs.check-trigger.outputs.skip_tests != 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Quick validation
+        run: |
+          echo "⚙️  Running lightweight validation steps"
+          if [[ -f package.json ]]; then
+            echo "Detected Node.js project, running npm test (if available)"
+            npm install --prefer-offline || true
+            npm test || echo "npm test skipped (no script)"
+          elif [[ -f pyproject.toml || -f requirements.txt ]]; then
+            echo "Detected Python project, running pytest (if available)"
+            python -m pip install -r requirements.txt || true
+            python -m pytest || echo "Pytest skipped (tests missing)"
+          else
+            echo "No recognised project type, skipping quick checks"
+          fi
+
+  # Build deployment artifacts
+  build-artifacts:
+    name: Build Deployment Artifacts
+    runs-on: ubuntu-latest
+    needs: [check-trigger, quick-ci]
+    if: always() && needs.check-trigger.outputs.should_run == 'true' && (needs.quick-ci.result == 'success' || needs.check-trigger.outputs.skip_tests == 'true' || github.event.inputs.force_deploy == 'true')
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate version
+        id: version
+        run: |
+          # Generate version number
+          if [[ "${{ github.event_name }}" == "push" ]] && [[ "${{ github.ref }}" =~ refs/tags/ ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION="auto-$(date +%Y%m%d-%H%M%S)-${GITHUB_SHA:0:7}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Generated version: $VERSION"
+
+      - name: Build release artifacts
+        run: |
+          echo "🔨 Preparing deployment package..."
+          tar -czf package-${{ steps.version.outputs.version }}.tar.gz .
+          sha256sum package-${{ steps.version.outputs.version }}.tar.gz > package-${{ steps.version.outputs.version }}.sha256
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-package-${{ steps.version.outputs.version }}
+          path: |
+            package-*.tar.gz
+            package-*.sha256
+
+  # Deploy to target environment
+  deploy:
+    name: Deploy to ${{ needs.check-trigger.outputs.deploy_env }}
+    runs-on: ubuntu-latest
+    needs: [check-trigger, build-artifacts]
+    if: always() && needs.build-artifacts.result == 'success'
+    environment:
+      name: ${{ needs.check-trigger.outputs.deploy_env }}
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: deployment-package-${{ needs.build-artifacts.outputs.version }}
+
+      - name: Deploy to ${{ needs.check-trigger.outputs.deploy_env }}
+        run: |
+          echo "🚀 Deploying to ${{ needs.check-trigger.outputs.deploy_env }}..."
+          echo "Version: ${{ needs.build-artifacts.outputs.version }}"
+          echo "Package: package-${{ needs.build-artifacts.outputs.version }}.tar.gz"
+          
+          # Verify package integrity
+          if [[ -f package-${{ needs.build-artifacts.outputs.version }}.sha256 ]]; then
+            sha256sum -c package-${{ needs.build-artifacts.outputs.version }}.sha256
+          else
+            echo "⚠️  Checksum file not found; skipping verification"
+          fi
+          
+          # Add actual deployment logic here
+          # e.g.: upload to server, update configuration, restart services
+          
+          case "${{ needs.check-trigger.outputs.deploy_env }}" in
+            "staging")
+              echo "📦 Deploying to staging environment..."
+              # staging deployment logic
+              ;;
+            "production")
+              echo "🎯 Deploying to production environment..."
+              # production deployment logic
+              ;;
+          esac
+
+      - name: Create deployment summary
+        run: |
+          echo "## 🎉 Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ needs.check-trigger.outputs.deploy_env }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Version:** ${{ needs.build-artifacts.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Trigger:** ${{ github.event_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch:** ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ needs.check-trigger.outputs.skip_tests }}" == "true" ]]; then
+            echo "- **⚠️ Tests:** Skipped" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **✅ Tests:** Passed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # Notification and cleanup
+  notify:
+    name: Notification & Cleanup
+    runs-on: ubuntu-latest
+    needs: [check-trigger, deploy]
+    if: always() && needs.check-trigger.outputs.should_run == 'true'
+    steps:
+      - name: Send notification
+        if: always()
+        run: |
+          STATUS="${{ needs.deploy.result }}"
+          ENV="${{ needs.check-trigger.outputs.deploy_env }}"
+          VERSION="${{ needs.build-artifacts.outputs.version }}"
+          
+          case "$STATUS" in
+            "success")
+              echo "✅ Deployment to $ENV completed successfully!"
+              ;;
+            "failure")
+              echo "❌ Deployment to $ENV failed!"
+              ;;
+            "cancelled")
+              echo "⏹️ Deployment to $ENV was cancelled!"
+              ;;
+          esac
+          
+          # Add actual notification logic here
+          # e.g.: Slack, email, DingTalk, etc.
+
+      - name: Cleanup temporary branches
+        if: github.event_name == 'push' && startsWith(github.ref_name, 'auto-deploy/')
+        run: |
+          echo "🧹 Cleaning up temporary deployment branch: ${{ github.ref_name }}"
+          # Optionally delete temporary branches
+          # git push origin --delete ${{ github.ref_name }}

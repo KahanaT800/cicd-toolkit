@@ -1,0 +1,229 @@
+{
+  "project_name": "EasyDeploy",
+  "project_type": "auto-detect",
+  "version": "2.0.0",
+  "description": "Deploy your apps effortlessly - No DevOps experience required!",
+  "trigger_keywords": [
+    "deploy",
+    "build", 
+    "release",
+    "publish",
+    "ship"
+  ],
+  "trigger_branches": [
+    "release/*",
+    "deploy/*",
+    "hotfix/*",
+    "production/*"
+  ],
+  "environments": {
+    "development": {
+      "auto_deploy": true,
+      "requires_approval": false,
+      "build_commands": [],
+      "deploy_commands": [],
+      "environment_variables": {}
+    },
+    "staging": {
+      "auto_deploy": true,
+      "requires_approval": false,
+      "build_commands": [],
+      "deploy_commands": [],
+      "environment_variables": {}
+    },
+    "production": {
+      "auto_deploy": false,
+      "requires_approval": true,
+      "build_commands": [],
+      "deploy_commands": [],
+      "environment_variables": {}
+    }
+  },
+  "project_templates": {
+    "nodejs": {
+      "build_commands": [
+        "npm ci",
+        "npm run build",
+        "npm test"
+      ],
+      "deploy_commands": [
+        "npm run deploy"
+      ],
+      "artifacts": [
+        "dist/",
+        "build/",
+        "node_modules/"
+      ]
+    },
+    "python": {
+      "build_commands": [
+        "pip install -r requirements.txt",
+        "python -m pytest",
+        "python setup.py build"
+      ],
+      "deploy_commands": [
+        "python -m pip install --upgrade .",
+        "python deploy.py"
+      ],
+      "artifacts": [
+        "dist/",
+        "build/",
+        "__pycache__/"
+      ]
+    },
+    "java": {
+      "build_commands": [
+        "./mvnw clean compile",
+        "./mvnw test",
+        "./mvnw package"
+      ],
+      "deploy_commands": [
+        "./mvnw deploy"
+      ],
+      "artifacts": [
+        "target/",
+        ".m2/"
+      ]
+    },
+    "cpp": {
+      "build_commands": [
+        "mkdir -p build",
+        "cd build && cmake ..",
+        "cd build && make",
+        "cd build && ctest"
+      ],
+      "deploy_commands": [
+        "cd build && make install"
+      ],
+      "artifacts": [
+        "build/",
+        "bin/",
+        "lib/"
+      ]
+    },
+    "go": {
+      "build_commands": [
+        "go mod tidy",
+        "go test ./...",
+        "go build ."
+      ],
+      "deploy_commands": [
+        "go install ."
+      ],
+      "artifacts": [
+        "bin/",
+        "dist/"
+      ]
+    },
+    "php": {
+      "build_commands": [
+        "composer install",
+        "vendor/bin/phpunit",
+        "php artisan optimize"
+      ],
+      "deploy_commands": [
+        "php artisan deploy"
+      ],
+      "artifacts": [
+        "vendor/",
+        "bootstrap/cache/"
+      ]
+    },
+    "ruby": {
+      "build_commands": [
+        "bundle install",
+        "bundle exec rspec",
+        "bundle exec rake assets:precompile"
+      ],
+      "deploy_commands": [
+        "bundle exec cap production deploy"
+      ],
+      "artifacts": [
+        "vendor/bundle/",
+        "public/assets/"
+      ]
+    },
+    "docker": {
+      "build_commands": [
+        "docker build -t ${PROJECT_NAME}:${VERSION} .",
+        "docker run --rm ${PROJECT_NAME}:${VERSION} npm test"
+      ],
+      "deploy_commands": [
+        "docker push ${PROJECT_NAME}:${VERSION}",
+        "docker-compose up -d"
+      ],
+      "artifacts": [
+        "*.tar",
+        "docker-compose.yml"
+      ]
+    }
+  },
+  "conflict_resolution": {
+    "strategy": "cancel_ci",
+    "wait_timeout": 300,
+    "retry_attempts": 3,
+    "strategies": [
+      "cancel_ci",
+      "wait",
+      "interactive"
+    ]
+  },
+  "notifications": {
+    "slack": {
+      "enabled": false,
+      "webhook_url": "",
+      "channel": "#deployments",
+      "username": "Auto CI/CD Bot"
+    },
+    "email": {
+      "enabled": false,
+      "smtp_server": "",
+      "recipients": []
+    },
+    "discord": {
+      "enabled": false,
+      "webhook_url": ""
+    },
+    "teams": {
+      "enabled": false,
+      "webhook_url": ""
+    }
+  },
+  "security": {
+    "require_signed_commits": false,
+    "allowed_users": [],
+    "allowed_teams": [],
+    "protected_branches": [
+      "main",
+      "master",
+      "production"
+    ]
+  },
+  "monitoring": {
+    "health_checks": {
+      "enabled": true,
+      "endpoints": [],
+      "timeout": 30
+    },
+    "rollback": {
+      "enabled": true,
+      "automatic": false,
+      "conditions": [
+        "health_check_failed",
+        "error_rate_high"
+      ]
+    }
+  },
+  "advanced": {
+    "parallel_jobs": 4,
+    "cache_enabled": true,
+    "cache_paths": [
+      "node_modules/",
+      ".cache/",
+      "vendor/"
+    ],
+    "custom_env_vars": {},
+    "before_hooks": [],
+    "after_hooks": []
+  }
+}

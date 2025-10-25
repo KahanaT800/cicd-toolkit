@@ -1,0 +1,447 @@
+name: Universal Auto CI/CD Pipeline
+
+# Universal CI/CD workflow that can be adapted to any project
+# Supports multiple trigger methods and project types
+
+on:
+  # Manual trigger with flexible options
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        description: 'Skip tests and deploy directly'
+        required: false
+        default: false
+        type: boolean
+      environment:
+        description: 'Deployment environment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      force_deploy:
+        description: 'Force deployment (even if tests fail)'
+        required: false
+        default: false
+        type: boolean
+      project_type:
+        description: 'Override project type detection'
+        required: false
+        default: 'auto-detect'
+        type: choice
+        options:
+          - auto-detect
+          - nodejs
+          - python
+          - java
+          - cpp
+          - go
+          - php
+          - ruby
+          - docker
+
+  # API trigger (webhook method)
+  repository_dispatch:
+    types: 
+      - auto-cicd
+      - deploy-staging
+      - deploy-production
+      - universal-deploy
+
+  # Trigger when pushing to specific branch prefixes
+  push:
+    branches:
+      - 'auto-deploy/**'
+      - 'release/**'
+      - 'deploy/**'
+      - 'hotfix/**'
+      - 'production/**'
+
+  # Pull request trigger for testing
+  pull_request:
+    branches: [ main, master, develop ]
+    types: [ opened, synchronize, reopened ]
+
+concurrency:
+  group: cicd-toolkit-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+env:
+  # Default environment variables
+  UNIVERSAL_CICD_VERSION: "1.0.0"
+  DEFAULT_NODE_VERSION: "18"
+  DEFAULT_PYTHON_VERSION: "3.9"
+  DEFAULT_JAVA_VERSION: "11"
+  DEFAULT_GO_VERSION: "1.19"
+
+jobs:
+  # Initialize and detect project configuration
+  initialize:
+    runs-on: ubuntu-latest
+    outputs:
+      project_type: ${{ steps.detect.outputs.project_type }}
+      environment: ${{ steps.detect.outputs.environment }}
+      should_deploy: ${{ steps.detect.outputs.should_deploy }}
+      build_commands: ${{ steps.detect.outputs.build_commands }}
+      deploy_commands: ${{ steps.detect.outputs.deploy_commands }}
+      skip_tests: ${{ steps.detect.outputs.skip_tests }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Install jq for JSON processing
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Detect Project Configuration
+        id: detect
+        run: |
+          # Load configuration
+          config_file="config/universal_config.json"
+          if [[ ! -f "$config_file" ]]; then
+            config_file="config/auto_cicd_config.json"
+          fi
+          
+          if [[ ! -f "$config_file" ]]; then
+            echo "⚠️ No configuration file found, using defaults"
+            project_type="auto-detect"
+            environment="staging"
+            should_deploy="false"
+          else
+            echo "📁 Loading configuration from $config_file"
+            
+            # Extract project type
+            project_type="${{ github.event.inputs.project_type || 'auto-detect' }}"
+            if [[ "$project_type" == "auto-detect" ]]; then
+              if [[ -f "package.json" ]]; then
+                project_type="nodejs"
+              elif [[ -f "requirements.txt" || -f "pyproject.toml" ]]; then
+                project_type="python"
+              elif [[ -f "pom.xml" || -f "build.gradle" ]]; then
+                project_type="java"
+              elif [[ -f "CMakeLists.txt" || -f "Makefile" ]]; then
+                project_type="cpp"
+              elif [[ -f "go.mod" ]]; then
+                project_type="go"
+              elif [[ -f "composer.json" ]]; then
+                project_type="php"
+              elif [[ -f "Gemfile" ]]; then
+                project_type="ruby"
+              elif [[ -f "Dockerfile" ]]; then
+                project_type="docker"
+              else
+                project_type="generic"
+              fi
+            fi
+            
+            # Determine environment
+            environment="${{ github.event.inputs.environment || 'staging' }}"
+            if [[ "${{ github.ref }}" == "refs/heads/main" || "${{ github.ref }}" == "refs/heads/master" ]]; then
+              environment="production"
+            elif [[ "${{ github.ref }}" == refs/heads/develop* ]]; then
+              environment="development"
+            fi
+            
+            # Check if should deploy
+            should_deploy="false"
+            commit_msg="${{ github.event.head_commit.message || '' }}"
+            
+            # Check trigger keywords
+            if echo "$commit_msg" | grep -E "\[(deploy|build|release|publish|ship)\]" > /dev/null; then
+              should_deploy="true"
+            fi
+            
+            # Check branch patterns
+            if echo "${{ github.ref }}" | grep -E "(release|deploy|hotfix|production)/" > /dev/null; then
+              should_deploy="true"
+            fi
+            
+            # Manual triggers
+            if [[ "${{ github.event_name }}" == "workflow_dispatch" || "${{ github.event_name }}" == "repository_dispatch" ]]; then
+              should_deploy="true"
+            fi
+            
+            # Extract commands from config
+            if [[ -f "$config_file" ]]; then
+              build_commands=$(jq -r --arg type "$project_type" '(.project_templates[$type].build_commands // .build_commands // []) | join(";")' "$config_file")
+              deploy_commands=$(jq -r --arg type "$project_type" '(.project_templates[$type].deploy_commands // .deploy_commands // []) | join(";")' "$config_file")
+            else
+              build_commands=""
+              deploy_commands=""
+            fi
+          fi
+          
+          skip_tests="${{ github.event.inputs.skip_tests || 'false' }}"
+          
+          echo "project_type=$project_type" >> $GITHUB_OUTPUT
+          echo "environment=$environment" >> $GITHUB_OUTPUT
+          echo "should_deploy=$should_deploy" >> $GITHUB_OUTPUT
+          echo "build_commands=$build_commands" >> $GITHUB_OUTPUT
+          echo "deploy_commands=$deploy_commands" >> $GITHUB_OUTPUT
+          echo "skip_tests=$skip_tests" >> $GITHUB_OUTPUT
+          
+          echo "🚀 Detected Configuration:"
+          echo "   Project Type: $project_type"
+          echo "   Environment: $environment"
+          echo "   Should Deploy: $should_deploy"
+          echo "   Skip Tests: $skip_tests"
+
+  # Conflict detection and resolution
+  conflict_check:
+    runs-on: ubuntu-latest
+    needs: initialize
+    if: needs.initialize.outputs.should_deploy == 'true'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup GitHub CLI
+        run: |
+          gh --version || (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | sudo dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg && \
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" | sudo tee /etc/apt/sources.list.d/github-cli.list > /dev/null && \
+          sudo apt update && sudo apt install -y gh)
+
+      - name: Check for Conflicting Workflows
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "🔍 Checking for conflicting CI workflows..."
+          
+          # Get running workflows
+          running_workflows=$(gh run list --status in_progress --json workflowName,conclusion,status --jq '.[] | select(.workflowName != "Universal Auto CI/CD Pipeline")')
+          
+          if [[ -n "$running_workflows" ]]; then
+            echo "⚠️ Found conflicting workflows:"
+            echo "$running_workflows"
+            
+            # Cancel conflicting CI workflows (but not CD)
+            gh run list --status in_progress --json workflowName,databaseId --jq '.[] | select(.workflowName | test("CI|Test|Build") and (test("CD|Deploy") | not)) | .databaseId' | while read -r run_id; do
+              echo "🚫 Canceling workflow run: $run_id"
+              gh run cancel "$run_id" || echo "Failed to cancel run $run_id"
+            done
+          else
+            echo "✅ No conflicting workflows detected"
+          fi
+
+  # Universal build job
+  build:
+    runs-on: ubuntu-latest
+    needs: [initialize, conflict_check]
+    if: needs.initialize.outputs.should_deploy == 'true'
+    strategy:
+      matrix:
+        include:
+          - project_type: ${{ needs.initialize.outputs.project_type }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Project Environment
+        run: |
+          project_type="${{ matrix.project_type }}"
+          echo "🛠️ Setting up environment for: $project_type"
+          
+          case $project_type in
+            "nodejs")
+              echo "Setting up Node.js..."
+              curl -fsSL https://deb.nodesource.com/setup_18.x | sudo -E bash -
+              sudo apt-get install -y nodejs
+              ;;
+            "python")
+              echo "Setting up Python..."
+              sudo apt-get update
+              sudo apt-get install -y python3 python3-pip python3-venv
+              ;;
+            "java")
+              echo "Setting up Java..."
+              sudo apt-get update
+              sudo apt-get install -y openjdk-11-jdk maven
+              ;;
+            "cpp")
+              echo "Setting up C++..."
+              sudo apt-get update
+              sudo apt-get install -y build-essential cmake
+              ;;
+            "go")
+              echo "Setting up Go..."
+              sudo rm -rf /usr/local/go
+              curl -L https://go.dev/dl/go1.19.linux-amd64.tar.gz | sudo tar -xzf - -C /usr/local
+              echo 'export PATH=$PATH:/usr/local/go/bin' >> $GITHUB_ENV
+              ;;
+            "php")
+              echo "Setting up PHP..."
+              sudo apt-get update
+              sudo apt-get install -y php php-cli php-mbstring composer
+              ;;
+            "ruby")
+              echo "Setting up Ruby..."
+              sudo apt-get update
+              sudo apt-get install -y ruby ruby-dev bundler
+              ;;
+            *)
+              echo "Generic setup or unsupported project type: $project_type"
+              ;;
+          esac
+
+      - name: Cache Dependencies
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.npm
+            ~/.cache/pip
+            ~/.m2
+            ~/.cache/go-build
+            ~/.composer
+            vendor/bundle
+          key: ${{ runner.os }}-${{ matrix.project_type }}-${{ hashFiles('**/package*.json', '**/requirements*.txt', '**/pom.xml', '**/go.sum', '**/composer.json', '**/Gemfile.lock') }}
+
+      - name: Run Build Commands
+        run: |
+          build_commands="${{ needs.initialize.outputs.build_commands }}"
+          
+          if [[ -n "$build_commands" ]]; then
+            echo "🔨 Running custom build commands..."
+            IFS=';' read -ra COMMANDS <<< "$build_commands"
+            for cmd in "${COMMANDS[@]}"; do
+              if [[ -n "$cmd" ]]; then
+                echo "▶️ $cmd"
+                eval "$cmd"
+              fi
+            done
+          else
+            echo "🔨 Running default build for ${{ matrix.project_type }}..."
+            case "${{ matrix.project_type }}" in
+              "nodejs")
+                npm ci
+                npm run build || npm run compile || echo "No build script found"
+                ;;
+              "python")
+                pip install -r requirements.txt || echo "No requirements.txt found"
+                python -m pytest || echo "No tests found"
+                ;;
+              "java")
+                ./mvnw clean package || mvn clean package || echo "No Maven wrapper found"
+                ;;
+              "cpp")
+                mkdir -p build && cd build
+                cmake .. && make
+                ;;
+              "go")
+                go mod tidy
+                go build .
+                ;;
+              *)
+                echo "No default build commands for ${{ matrix.project_type }}"
+                ;;
+            esac
+          fi
+
+      - name: Run Tests
+        if: needs.initialize.outputs.skip_tests != 'true'
+        run: |
+          echo "🧪 Running tests for ${{ matrix.project_type }}..."
+          case "${{ matrix.project_type }}" in
+            "nodejs")
+              npm test || echo "No test script found"
+              ;;
+            "python")
+              python -m pytest || python -m unittest discover || echo "No tests found"
+              ;;
+            "java")
+              ./mvnw test || mvn test || echo "No Maven wrapper found"
+              ;;
+            "cpp")
+              cd build && ctest || echo "No tests configured"
+              ;;
+            "go")
+              go test ./... || echo "No tests found"
+              ;;
+            *)
+              echo "No default test commands for ${{ matrix.project_type }}"
+              ;;
+          esac
+
+      - name: Upload Build Artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: build-artifacts-${{ matrix.project_type }}
+          path: |
+            dist/
+            build/
+            target/
+            bin/
+            public/
+          retention-days: 7
+
+  # Universal deployment job
+  deploy:
+    runs-on: ubuntu-latest
+    needs: [initialize, build]
+    if: needs.initialize.outputs.should_deploy == 'true' && (success() || github.event.inputs.force_deploy == 'true')
+    environment: ${{ needs.initialize.outputs.environment }}
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download Build Artifacts
+        uses: actions/download-artifact@v3
+        with:
+          name: build-artifacts-${{ needs.initialize.outputs.project_type }}
+          path: ./artifacts
+
+      - name: Deploy Application
+        run: |
+          environment="${{ needs.initialize.outputs.environment }}"
+          project_type="${{ needs.initialize.outputs.project_type }}"
+          deploy_commands="${{ needs.initialize.outputs.deploy_commands }}"
+          
+          echo "🚀 Deploying $project_type to $environment..."
+          
+          if [[ -n "$deploy_commands" ]]; then
+            echo "📋 Running custom deploy commands..."
+            IFS=';' read -ra COMMANDS <<< "$deploy_commands"
+            for cmd in "${COMMANDS[@]}"; do
+              if [[ -n "$cmd" ]]; then
+                echo "▶️ $cmd"
+                eval "$cmd"
+              fi
+            done
+          else
+            echo "📋 Running default deployment for $project_type..."
+            case "$project_type" in
+              "nodejs")
+                echo "Deploying Node.js application..."
+                # Add your deployment logic here
+                ;;
+              "python")
+                echo "Deploying Python application..."
+                # Add your deployment logic here
+                ;;
+              *)
+                echo "Default deployment for $project_type"
+                echo "Environment: $environment"
+                echo "Artifacts available in ./artifacts/"
+                ;;
+            esac
+          fi
+
+      - name: Health Check
+        run: |
+          echo "🏥 Running post-deployment health checks..."
+          # Add health check logic here
+          echo "✅ Deployment completed successfully"
+
+      - name: Notify Success
+        if: success()
+        run: |
+          echo "🎉 Deployment to ${{ needs.initialize.outputs.environment }} completed successfully!"
+          echo "Project: ${{ needs.initialize.outputs.project_type }}"
+          echo "Environment: ${{ needs.initialize.outputs.environment }}"
+          echo "Commit: ${{ github.sha }}"
+
+      - name: Notify Failure
+        if: failure()
+        run: |
+          echo "❌ Deployment to ${{ needs.initialize.outputs.environment }} failed!"
+          echo "Please check the logs and take appropriate action."

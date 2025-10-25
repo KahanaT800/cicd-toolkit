@@ -1,0 +1,34 @@
+{
+  "project_name": "cicd-toolkit",
+  "project_type": "generic",
+  "description": "Generic project",
+  "version": "1.0.0",
+  "beginner_mode": true,
+  "auto_detect": true,
+  "environments": {
+    "development": {
+      "description": "For testing your changes",
+      "auto_deploy": true,
+      "require_approval": false,
+      "friendly_name": "Development/Testing"
+    },
+    "production": {
+      "description": "Where your users see your app",
+      "auto_deploy": false,
+      "require_approval": true,
+      "friendly_name": "Live/Production"
+    }
+  },
+  "deployment": {
+    "build_timeout": "10m",
+    "deploy_timeout": "5m",
+    "auto_rollback": true,
+    "health_check": true,
+    "beginner_friendly_errors": true
+  },
+  "notifications": {
+    "deployment_success": true,
+    "deployment_failure": true,
+    "friendly_messages": true
+  }
+}

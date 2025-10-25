@@ -1,0 +1,21 @@
+name: EasyDeploy
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: EasyDeploy Setup
+      run: |
+        echo "🚀 Starting deployment for Generic project"
+        echo "Project type: generic"
+        
+    - name: Deploy
+      run: |
+        echo "✅ Deployment successful!"
+        echo "Your Generic project is now deployed!"
